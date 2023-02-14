@@ -7,6 +7,7 @@ import android.text.TextUtils
 import android.view.LayoutInflater
 import android.view.TextureView
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
 import androidx.constraintlayout.widget.ConstraintLayout
 import androidx.constraintlayout.widget.ConstraintSet
 import androidx.transition.TransitionManager
@@ -28,12 +29,27 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         private const val KEY_CHANNEL = "key_channel"
         private const val KEY_FLV_URL = "key_flv_url"
         private const val KEY_HLS_URL = "key_hls_url"
+        private const val KEY_ENABLE_HARDWARE = "key_enable_hardware"
+        private const val KEY_ENABLE_STREAM = "key_enable_stream"
 
-        fun start(activity: Activity, channel: String, flvUrl: String, hlsUrl: String) {
+        // 默认超分
+        private const val DEFAULT_RTC_SR = 6
+
+        fun start(
+            activity: Activity,
+            channel: String,
+            flvUrl: String,
+            hlsUrl: String,
+            enableHardware: Boolean,
+            enableStream: Boolean
+        ) {
             val intent = Intent(activity, LivingActivity::class.java).apply {
                 putExtra(KEY_CHANNEL, channel)
                 putExtra(KEY_FLV_URL, flvUrl)
                 putExtra(KEY_HLS_URL, hlsUrl)
+                putExtra(KEY_HLS_URL, hlsUrl)
+                putExtra(KEY_ENABLE_HARDWARE, enableHardware)
+                putExtra(KEY_ENABLE_STREAM, enableStream)
             }
             activity.startActivity(intent)
         }
@@ -48,6 +64,9 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
     private var rtcEngine: RtcEngineEx? = null
     private var mediaPlayerHls: IMediaPlayer? = null
     private var mediaPlayerFlv: IMediaPlayer? = null
+    private var joinRtc: Boolean = true
+    private var enableHls: Boolean = true
+    private var enableFlv: Boolean = true
 
     private val channel: String by lazy {
         intent?.getStringExtra(KEY_CHANNEL) ?: ""
@@ -61,6 +80,14 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         intent?.getStringExtra(KEY_FLV_URL) ?: ""
     }
 
+    private val enableHardware: Boolean by lazy {
+        intent?.getBooleanExtra(KEY_ENABLE_HARDWARE, true) ?: true
+    }
+
+    private val enableStream: Boolean by lazy {
+        intent?.getBooleanExtra(KEY_ENABLE_STREAM, true) ?: true
+    }
+
     override fun getViewBinding(inflater: LayoutInflater): ActivityLivingBinding {
         return ActivityLivingBinding.inflate(inflater)
     }
@@ -68,6 +95,9 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         initRtcPlayer()
+        if (enableStream) {
+            loadVideo()
+        }
     }
 
     override fun initView() {
@@ -121,6 +151,70 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         binding.ivBack.setOnClickListener {
             onBackPressed()
         }
+        binding.editSr.setText("$DEFAULT_RTC_SR")
+        binding.editSr.post {
+            binding.editSr.setSelection(binding.editSr.text?.length ?: 0)
+        }
+        binding.editSr.setOnEditorActionListener { textView, actionId, keyEvent ->
+            when (actionId and EditorInfo.IME_MASK_ACTION) {
+                EditorInfo.IME_ACTION_DONE -> {
+                    val srNum = binding.editSr.text?.trim()?.toString()
+                    binding.editSr.clearFocus()
+                    updateRtcSr(srNum?.toIntOrNull() ?: DEFAULT_RTC_SR)
+                }
+                else -> {}
+            }
+            false
+        }
+        binding.btnSetSr.setOnClickListener {
+            val srNum = binding.editSr.text?.trim()?.toString()
+            binding.editSr.clearFocus()
+            updateRtcSr(srNum?.toIntOrNull() ?: DEFAULT_RTC_SR)
+        }
+        binding.btnJoinRtc.setOnClickListener {
+            if (joinRtc) {
+                leaveRtcChannel()
+            } else {
+                joinRtcChannel()
+            }
+            joinRtc = !joinRtc
+            updateText()
+        }
+        binding.btnEnableHls.setOnClickListener {
+            if (enableHls) {
+                destroyPlayerHls()
+            } else {
+                doPlayerHls()
+            }
+            enableHls = !enableHls
+            updateText()
+        }
+        binding.btnEnableFlv.setOnClickListener {
+            if (enableFlv) {
+                destroyPlayerFlv()
+            } else {
+                doPlayerFlv()
+            }
+            enableFlv = !enableFlv
+            updateText()
+        }
+
+        joinRtc = enableStream
+        enableHls = enableStream
+        enableFlv = enableStream
+        updateText()
+    }
+
+    private fun updateText() {
+        binding.btnJoinRtc.text = if (joinRtc) "离开频道" else "加入频道"
+        binding.btnEnableHls.text = if (enableHls) "停止Hls拉流" else "开始Hls拉流"
+        binding.btnEnableFlv.text = if (enableFlv) "停止Flv拉流" else "开始Flv拉流"
+    }
+
+    private fun updateRtcSr(srNum: Int) {
+        // 默认开启1倍超分 1.33倍为7,1倍超分为6，超分支持频道内设置
+        rtcEngine?.setParameters("{\"rtc.video.enable_sr\":{\"enabled\":true, \"mode\":2}}")
+        rtcEngine?.setParameters("{\"rtc.video.sr_type\":$srNum}")
     }
 
     private fun enlargeLiving() {
@@ -256,17 +350,6 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         } catch (e: Exception) {
             LogTools.e("RtcEngine.create() called error: $e")
         }
-        // 将用户角色设置为观众，将延时性设置为低延时。
-        val clientRoleOptions = ClientRoleOptions()
-        clientRoleOptions.audienceLatencyLevel = Constants.AUDIENCE_LATENCY_LEVEL_LOW_LATENCY
-        rtcEngine?.setClientRole(Constants.CLIENT_ROLE_AUDIENCE, clientRoleOptions)
-        rtcEngine?.enableVideo()
-        // 直播场景下，设置频道场景为 BROADCASTING。
-        rtcEngine?.setChannelProfile(Constants.CHANNEL_PROFILE_LIVE_BROADCASTING)
-        rtcEngine?.setAudioProfile(Constants.AUDIO_PROFILE_MUSIC_STANDARD_STEREO)
-        rtcEngine?.setAudioScenario(Constants.AUDIO_SCENARIO_GAME_STREAMING)
-
-        loadVideo()
     }
 
     // 加载主播画面
@@ -308,11 +391,47 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         doPlayerFlv()
     }
 
+    // 加入rtc 频道
     private fun joinRtcChannel() {
+        rtcEngine?.let {
+            val retHardware = if (enableHardware) {
+                // 开启android硬解, 硬解不支持频道内设置
+                it.setParameters("{\"engine.video.enable_hw_decoder\":true}")
+            } else {
+                it.setParameters("{\"engine.video.enable_hw_decoder\":false}")
+            }
+            LogTools.d("Rtc Engine set hardware_decoding enableHardware:$enableHardware ret:$retHardware")
+        }
+        // 默认开启1倍超分 1.33倍为7,1倍超分为6
+        rtcEngine?.setParameters("{\"rtc.video.enable_sr\":{\"enabled\":true, \"mode\":2}}")
+        rtcEngine?.setParameters("{\"rtc.video.sr_type\":$DEFAULT_RTC_SR}")
+        // 将用户角色设置为观众，将延时性设置为低延时。
+        val clientRoleOptions = ClientRoleOptions()
+        clientRoleOptions.audienceLatencyLevel = Constants.AUDIENCE_LATENCY_LEVEL_LOW_LATENCY
+        rtcEngine?.setClientRole(Constants.CLIENT_ROLE_AUDIENCE, clientRoleOptions)
+        rtcEngine?.enableVideo()
+        // 直播场景下，设置频道场景为 BROADCASTING。
+        rtcEngine?.setChannelProfile(Constants.CHANNEL_PROFILE_LIVE_BROADCASTING)
+        rtcEngine?.setAudioProfile(Constants.AUDIO_PROFILE_MUSIC_STANDARD_STEREO)
+        rtcEngine?.setAudioScenario(Constants.AUDIO_SCENARIO_GAME_STREAMING)
+
         val mediaOptions = ChannelMediaOptions()
         mediaOptions.autoSubscribeAudio = false
         mediaOptions.autoSubscribeVideo = true
+        // 开启媒体帧加速渲染
+        val ret = rtcEngine?.enableInstantMediaRendering()
+        if (ret == 0) {
+            LogTools.d("Rtc Engine enableInstantMediaRendering success")
+        } else {
+            LogTools.e("Rtc Engine enableInstantMediaRendering failed:$ret")
+        }
+
         rtcEngine?.joinChannel(null, channel, 0, mediaOptions)
+    }
+
+    private fun leaveRtcChannel() {
+        rtcEngine?.leaveChannel()
+        removeRtcVideo(curBroadcastUid)
     }
 
     private fun doPlayerHls() {
@@ -322,7 +441,6 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         }
         mediaPlayerHls = rtcEngine?.createMediaPlayer()
         mediaPlayerHls?.open(hlsUrl, 0)
-        mediaPlayerHls?.mute(true)
         mediaPlayerHls?.registerPlayerObserver(object : MediaPlayerObserver() {
 
             override fun onPlayerStateChanged(
@@ -334,12 +452,13 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
                 when (state) {
                     io.agora.mediaplayer.Constants.MediaPlayerState.PLAYER_STATE_OPEN_COMPLETED -> {
                         // 资源准备完成，可以播放
+                        mediaPlayerHls?.mute(true)
                         mediaPlayerHls?.play()
                     }
                     io.agora.mediaplayer.Constants.MediaPlayerState.PLAYER_STATE_FAILED -> {
                         // 播放失败
                         ThreadTools.get().runOnMainThread {
-                            ToastTools.toastLong(this@LivingActivity,"HLS 拉流播放失败")
+                            ToastTools.toastLong(this@LivingActivity, "HLS 拉流播放失败")
                         }
                     }
                     else -> {}
@@ -352,6 +471,14 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         mediaPlayerHls?.setView(textureView)
     }
 
+    private fun destroyPlayerHls() {
+        if (mediaPlayerFlv != null) {
+            mediaPlayerFlv?.destroy()
+            mediaPlayerFlv = null
+        }
+        if (binding.containerHls.childCount > 0) binding.containerHls.removeAllViews()
+    }
+
     private fun doPlayerFlv() {
         if (mediaPlayerFlv != null) {
             mediaPlayerFlv?.destroy()
@@ -359,7 +486,7 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         }
         mediaPlayerFlv = rtcEngine?.createMediaPlayer()
         mediaPlayerFlv?.open(flvUrl, 0)
-        mediaPlayerFlv?.mute(true)
+        // mediaPlayerFlv?.mute(true) 这里不生效
         mediaPlayerFlv?.registerPlayerObserver(object : MediaPlayerObserver() {
             override fun onPlayerStateChanged(
                 state: io.agora.mediaplayer.Constants.MediaPlayerState?,
@@ -369,13 +496,14 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
                 LogTools.d("IMediaPlayer FLV onPlayerStateChanged ,$state $error")
                 when (state) {
                     io.agora.mediaplayer.Constants.MediaPlayerState.PLAYER_STATE_OPEN_COMPLETED -> {
+                        mediaPlayerFlv?.mute(true) // 这里生效
                         // 资源准备完成，可以播放
                         mediaPlayerFlv?.play()
                     }
                     io.agora.mediaplayer.Constants.MediaPlayerState.PLAYER_STATE_FAILED -> {
                         // 播放失败
                         ThreadTools.get().runOnMainThread {
-                            ToastTools.toastLong(this@LivingActivity,"FLV 拉流播放失败")
+                            ToastTools.toastLong(this@LivingActivity, "FLV 拉流播放失败")
                         }
                     }
                     else -> {}
@@ -386,6 +514,14 @@ class LivingActivity : BaseUiActivity<ActivityLivingBinding>() {
         val textureView = TextureView(this)
         binding.containerFlv.addView(textureView)
         mediaPlayerFlv?.setView(textureView)
+    }
+
+    private fun destroyPlayerFlv() {
+        if (mediaPlayerFlv != null) {
+            mediaPlayerFlv?.destroy()
+            mediaPlayerFlv = null
+        }
+        if (binding.containerFlv.childCount > 0) binding.containerFlv.removeAllViews()
     }
 
     override fun onBackPressed() {
